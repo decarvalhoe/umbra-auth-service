@@ -135,3 +135,60 @@ def register():
         ),
         201,
     )
+
+
+@auth_bp.post("/auth/login")
+def login():
+    payload = request.get_json(silent=True) or {}
+    errors, email, password = _validate_input(payload)
+
+    if errors:
+        return (
+            jsonify({"success": False, "errors": errors, "message": "Données invalides."}),
+            400,
+        )
+
+    assert email is not None and password is not None  # For type checkers
+
+    user = db.session.execute(db.select(User).filter_by(email=email)).scalar_one_or_none()
+
+    if user is None or not user.check_password(password):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "errors": {
+                        "credentials": "Email ou mot de passe invalide.",
+                    },
+                    "message": "Identifiants invalides.",
+                }
+            ),
+            401,
+        )
+
+    access_token = create_access_token(identity=user.id)
+    refresh_token = create_refresh_token(identity=user.id)
+
+    now = datetime.now(timezone.utc)
+    refresh_token_entry = RefreshToken(
+        user=user,
+        token=refresh_token,
+        expires_at=_resolve_refresh_token_expiry(now),
+    )
+    db.session.add(refresh_token_entry)
+    db.session.commit()
+
+    return (
+        jsonify(
+            {
+                "success": True,
+                "data": {
+                    "user": {"id": user.id, "email": user.email},
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                },
+                "message": "Connexion réussie.",
+            }
+        ),
+        200,
+    )
