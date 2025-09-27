@@ -192,3 +192,61 @@ def login():
         ),
         200,
     )
+
+
+@auth_bp.post("/auth/refresh")
+def refresh():
+    payload = request.get_json(silent=True) or {}
+    refresh_token = payload.get("refresh_token")
+
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "errors": {"refresh_token": "Refresh token requis."},
+                    "message": "Données invalides.",
+                }
+            ),
+            400,
+        )
+
+    normalized_token = refresh_token.strip()
+    stored_token = db.session.execute(
+        db.select(RefreshToken).filter_by(token=normalized_token)
+    ).scalar_one_or_none()
+
+    if (
+        stored_token is None
+        or stored_token.revoked
+        or stored_token.is_expired(datetime.now(timezone.utc))
+    ):
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "errors": {
+                        "refresh_token": "Refresh token invalide ou expiré.",
+                    },
+                    "message": "Token de rafraîchissement invalide.",
+                }
+            ),
+            401,
+        )
+
+    user = stored_token.user
+    access_token = create_access_token(identity=user.id)
+
+    return (
+        jsonify(
+            {
+                "success": True,
+                "data": {
+                    "user": {"id": user.id, "email": user.email},
+                    "access_token": access_token,
+                },
+                "message": "Token renouvelé avec succès.",
+            }
+        ),
+        200,
+    )
