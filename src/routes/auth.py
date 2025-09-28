@@ -4,7 +4,12 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, current_app, jsonify, request
-from flask_jwt_extended import create_access_token, create_refresh_token
+from flask_jwt_extended import (
+    create_access_token,
+    create_refresh_token,
+    get_jwt_identity,
+    jwt_required,
+)
 from sqlalchemy.exc import IntegrityError
 
 from src import db
@@ -108,8 +113,8 @@ def register():
             409,
         )
 
-    access_token = create_access_token(identity=user.id)
-    refresh_token = create_refresh_token(identity=user.id)
+    access_token = create_access_token(identity=str(user.id))
+    refresh_token = create_refresh_token(identity=str(user.id))
 
     now = datetime.now(timezone.utc)
     refresh_token_entry = RefreshToken(
@@ -166,8 +171,8 @@ def login():
             401,
         )
 
-    access_token = create_access_token(identity=user.id)
-    refresh_token = create_refresh_token(identity=user.id)
+    access_token = create_access_token(identity=str(user.id))
+    refresh_token = create_refresh_token(identity=str(user.id))
 
     now = datetime.now(timezone.utc)
     refresh_token_entry = RefreshToken(
@@ -235,7 +240,18 @@ def refresh():
         )
 
     user = stored_token.user
-    access_token = create_access_token(identity=user.id)
+    access_token = create_access_token(identity=str(user.id))
+
+    now = datetime.now(timezone.utc)
+    stored_token.revoked = True
+    new_refresh_token = create_refresh_token(identity=str(user.id))
+    new_refresh_entry = RefreshToken(
+        user=user,
+        token=new_refresh_token,
+        expires_at=_resolve_refresh_token_expiry(now),
+    )
+    db.session.add(new_refresh_entry)
+    db.session.commit()
 
     return (
         jsonify(
@@ -244,8 +260,85 @@ def refresh():
                 "data": {
                     "user": {"id": user.id, "email": user.email},
                     "access_token": access_token,
+                    "refresh_token": new_refresh_token,
                 },
                 "message": "Token renouvelé avec succès.",
+            }
+        ),
+        200,
+    )
+
+
+@auth_bp.post("/auth/logout")
+def logout():
+    payload = request.get_json(silent=True) or {}
+    refresh_token = payload.get("refresh_token")
+
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "errors": {"refresh_token": "Refresh token requis."},
+                    "message": "Données invalides.",
+                }
+            ),
+            400,
+        )
+
+    normalized_token = refresh_token.strip()
+    stored_token = db.session.execute(
+        db.select(RefreshToken).filter_by(token=normalized_token)
+    ).scalar_one_or_none()
+
+    if stored_token is not None and not stored_token.revoked:
+        stored_token.revoked = True
+        db.session.commit()
+
+    return (
+        jsonify(
+            {
+                "success": True,
+                "data": {"revoked": True},
+                "message": "Déconnexion effectuée.",
+            }
+        ),
+        200,
+    )
+
+
+@auth_bp.get("/auth/me")
+@jwt_required()
+def me():
+    identity = get_jwt_identity()
+
+    user = None
+    if isinstance(identity, int):
+        user = db.session.get(User, identity)
+    else:
+        try:
+            user = db.session.get(User, int(identity))
+        except (TypeError, ValueError):
+            user = None
+
+    if user is None:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "errors": {"user": "Utilisateur introuvable."},
+                    "message": "Utilisateur introuvable.",
+                }
+            ),
+            404,
+        )
+
+    return (
+        jsonify(
+            {
+                "success": True,
+                "data": {"user": {"id": user.id, "email": user.email}},
+                "message": "Profil utilisateur récupéré.",
             }
         ),
         200,
